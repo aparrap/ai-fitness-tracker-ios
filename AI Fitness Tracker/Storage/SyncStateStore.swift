@@ -5,6 +5,7 @@ struct SyncStateStore {
     private let defaults = UserDefaults.standard
     private let lastSuccessfulSyncKey = "apple-health.last-successful-sync"
     private let workoutAnchorKey = "apple-health.workout-query-anchor"
+    private let pendingAutomaticSyncIdKey = "apple-health.pending-automatic-sync-id"
 
     var lastSuccessfulSyncDate: Date? {
         get { defaults.object(forKey: lastSuccessfulSyncKey) as? Date }
@@ -45,5 +46,23 @@ struct SyncStateStore {
 
     func clearWorkoutAnchor() {
         defaults.removeObject(forKey: workoutAnchorKey)
+    }
+
+    func pendingAutomaticSyncId() -> String? {
+        defaults.string(forKey: pendingAutomaticSyncIdKey)
+    }
+
+    func createPendingAutomaticSyncId() -> String {
+        if let existing = pendingAutomaticSyncId() {
+            return existing
+        }
+
+        let syncId = "healthkit-anchor-\(UUID().uuidString.lowercased())"
+        defaults.set(syncId, forKey: pendingAutomaticSyncIdKey)
+        return syncId
+    }
+
+    func clearPendingAutomaticSyncId() {
+        defaults.removeObject(forKey: pendingAutomaticSyncIdKey)
     }
 }
