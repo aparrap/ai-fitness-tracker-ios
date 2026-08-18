@@ -39,9 +39,9 @@ final class HealthKitReader {
     /// (for example Apple Watch + iPhone). Only one canonical source/device stream is returned
     /// so interval metrics such as distance and energy cannot be double-counted downstream.
     ///
-    /// When workouts overlap, fallback also excludes samples explicitly associated with one
-    /// of the other overlapping workouts. This prevents a time-window match from reassigning
-    /// a globally-idempotent HealthKit sample away from the workout it actually belongs to.
+    /// When workouts overlap, fallback excludes samples explicitly associated with another
+    /// workout. Remaining unassociated samples are deterministically allocated to at most one
+    /// overlapping workout so the same HealthKit UUID is never exported under two workouts.
     func quantitySamples(
         identifier: HKQuantityTypeIdentifier,
         for workout: HKWorkout,
@@ -77,8 +77,13 @@ final class HealthKitReader {
             type: quantityType,
             predicate: intervalPredicate
         )
-        let eligibleIntervalSamples = intervalSamples.filter {
-            !reservedSampleIDs.contains($0.uuid)
+        let eligibleIntervalSamples = intervalSamples.filter { sample in
+            !reservedSampleIDs.contains(sample.uuid)
+                && fallbackSampleBelongsToWorkout(
+                    sample,
+                    workout: workout,
+                    overlappingWorkouts: overlappingWorkouts
+                )
         }
         let canonicalSamples = canonicalFallbackStream(
             from: eligibleIntervalSamples,
@@ -145,6 +150,40 @@ final class HealthKitReader {
             result.formUnion(associated.map(\.uuid))
         }
         return result
+    }
+
+    private func fallbackSampleBelongsToWorkout(
+        _ sample: HKQuantitySample,
+        workout: HKWorkout,
+        overlappingWorkouts: [HKWorkout]
+    ) -> Bool {
+        let candidates = ([workout] + overlappingWorkouts).filter { candidate in
+            sample.startDate >= candidate.startDate && sample.endDate <= candidate.endDate
+        }
+
+        guard candidates.count > 1 else { return true }
+
+        let sampleMidpoint = sample.startDate.timeIntervalSinceReferenceDate
+            + sample.endDate.timeIntervalSince(sample.startDate) / 2
+
+        let owner = candidates.min { left, right in
+            let leftMidpoint = left.startDate.timeIntervalSinceReferenceDate
+                + left.endDate.timeIntervalSince(left.startDate) / 2
+            let rightMidpoint = right.startDate.timeIntervalSinceReferenceDate
+                + right.endDate.timeIntervalSince(right.startDate) / 2
+            let leftDistance = abs(sampleMidpoint - leftMidpoint)
+            let rightDistance = abs(sampleMidpoint - rightMidpoint)
+
+            if leftDistance != rightDistance {
+                return leftDistance < rightDistance
+            }
+            if left.duration != right.duration {
+                return left.duration < right.duration
+            }
+            return left.uuid.uuidString < right.uuid.uuidString
+        }
+
+        return owner?.uuid == workout.uuid
     }
 
     private func canonicalFallbackStream(
