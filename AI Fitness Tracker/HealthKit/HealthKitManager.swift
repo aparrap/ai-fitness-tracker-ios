@@ -47,7 +47,8 @@ final class HealthKitManager {
     }
 
     func enableWorkoutBackgroundDelivery() async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             healthStore.enableBackgroundDelivery(
                 for: HKObjectType.workoutType(),
                 frequency: .immediate
