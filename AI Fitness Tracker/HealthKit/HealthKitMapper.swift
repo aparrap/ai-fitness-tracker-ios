@@ -12,6 +12,8 @@ final class HealthKitMapper {
     }
 
     private let reader: HealthKitReader
+    private let maxConcurrentWorkoutMappings = 2
+    private let maxConcurrentMetricQueries = 3
 
     init(reader: HealthKitReader) {
         self.reader = reader
@@ -23,12 +25,7 @@ final class HealthKitMapper {
 
         let weights = try await weightSamples.map(mapWeight)
         let healthWorkouts = try await workoutSamples
-        var workouts: [AppleHealthWorkout] = []
-        workouts.reserveCapacity(healthWorkouts.count)
-
-        for workout in healthWorkouts {
-            workouts.append(try await mapWorkout(workout))
-        }
+        let workouts = try await mapWorkouts(healthWorkouts)
 
         return AppleHealthImportRequest(
             syncId: "iphone-\(ISO8601DateFormatter().string(from: endDate))-\(UUID().uuidString.lowercased())",
@@ -37,6 +34,49 @@ final class HealthKitMapper {
             weights: weights,
             workouts: workouts
         )
+    }
+
+    private func mapWorkouts(_ healthWorkouts: [HKWorkout]) async throws -> [AppleHealthWorkout] {
+        guard !healthWorkouts.isEmpty else { return [] }
+
+        var indexedResults: [(index: Int, workout: AppleHealthWorkout)] = []
+        indexedResults.reserveCapacity(healthWorkouts.count)
+
+        for batchStart in stride(
+            from: 0,
+            to: healthWorkouts.count,
+            by: maxConcurrentWorkoutMappings
+        ) {
+            let batchEnd = min(
+                batchStart + maxConcurrentWorkoutMappings,
+                healthWorkouts.count
+            )
+
+            let batchResults = try await withThrowingTaskGroup(
+                of: (Int, AppleHealthWorkout).self,
+                returning: [(Int, AppleHealthWorkout)].self
+            ) { group in
+                for index in batchStart..<batchEnd {
+                    let workout = healthWorkouts[index]
+                    group.addTask { [self] in
+                        (index, try await mapWorkout(workout))
+                    }
+                }
+
+                var results: [(Int, AppleHealthWorkout)] = []
+                results.reserveCapacity(batchEnd - batchStart)
+                for try await result in group {
+                    results.append(result)
+                }
+                return results
+            }
+
+            indexedResults.append(contentsOf: batchResults)
+        }
+
+        return indexedResults
+            .sorted { $0.index < $1.index }
+            .map { $0.workout }
     }
 
     private func mapWeight(_ sample: HKQuantitySample) -> AppleHealthWeight {
@@ -154,33 +194,88 @@ final class HealthKitMapper {
 
         var result: [AppleHealthWorkoutSample] = []
 
-        for definition in definitions {
-            let queryResult = try await reader.quantitySamples(
-                identifier: definition.identifier,
-                for: workout
+        for batchStart in stride(
+            from: 0,
+            to: definitions.count,
+            by: maxConcurrentMetricQueries
+        ) {
+            let batchEnd = min(
+                batchStart + maxConcurrentMetricQueries,
+                definitions.count
             )
+            let batch = Array(definitions[batchStart..<batchEnd])
 
-            result.append(contentsOf: queryResult.samples.map { sample in
-                AppleHealthWorkoutSample(
-                    sourceRecordId: sample.uuid.uuidString.lowercased(),
-                    metric: definition.metric,
-                    sampledAt: sample.startDate,
-                    sampleEndedAt: sample.endDate,
-                    value: sample.quantity.doubleValue(for: definition.unit),
-                    unit: definition.unitName,
-                    associationKind: queryResult.associationKind,
-                    aggregation: definition.aggregation,
-                    sourceName: sample.sourceRevision.source.name,
-                    sourceBundleIdentifier: sample.sourceRevision.source.bundleIdentifier
-                )
-            })
+            let batchSamples = try await withThrowingTaskGroup(
+                of: [AppleHealthWorkoutSample].self,
+                returning: [AppleHealthWorkoutSample].self
+            ) { group in
+                for definition in batch {
+                    group.addTask { [reader] in
+                        let queryResult = try await reader.quantitySamples(
+                            identifier: definition.identifier,
+                            for: workout
+                        )
+
+                        return queryResult.samples.compactMap { sample in
+                            let value = sample.quantity.doubleValue(for: definition.unit)
+                            guard Self.isValidMetricValue(value, metric: definition.metric) else {
+                                return nil
+                            }
+
+                            return AppleHealthWorkoutSample(
+                                sourceRecordId: sample.uuid.uuidString.lowercased(),
+                                metric: definition.metric,
+                                sampledAt: sample.startDate,
+                                sampleEndedAt: sample.endDate,
+                                value: value,
+                                unit: definition.unitName,
+                                associationKind: queryResult.associationKind,
+                                aggregation: definition.aggregation,
+                                sourceName: sample.sourceRevision.source.name,
+                                sourceBundleIdentifier: sample.sourceRevision.source.bundleIdentifier
+                            )
+                        }
+                    }
+                }
+
+                var mapped: [AppleHealthWorkoutSample] = []
+                for try await samples in group {
+                    mapped.append(contentsOf: samples)
+                }
+                return mapped
+            }
+
+            result.append(contentsOf: batchSamples)
         }
 
         return result.sorted { left, right in
             if left.sampledAt == right.sampledAt {
+                if left.metric == right.metric {
+                    return left.sourceRecordId < right.sourceRecordId
+                }
                 return left.metric < right.metric
             }
             return left.sampledAt < right.sampledAt
+        }
+    }
+
+    private static func isValidMetricValue(_ value: Double, metric: String) -> Bool {
+        guard value.isFinite else { return false }
+
+        switch metric {
+        case "heart_rate":
+            return value > 0 && value <= 260
+        case "running_speed",
+             "distance",
+             "active_energy",
+             "step_count",
+             "running_power",
+             "running_stride_length",
+             "running_vertical_oscillation",
+             "running_ground_contact_time":
+            return value >= 0
+        default:
+            return false
         }
     }
 
