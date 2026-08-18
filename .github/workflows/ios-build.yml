@@ -3,29 +3,36 @@ name: iOS Build
 on:
   push:
     branches:
-      - agent/detailed-workout-sync
+      - 'agent/**'
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Xcode version
         run: xcodebuild -version
 
       - name: Build iOS app
         run: |
-          set -o pipefail
           xcodebuild \
+            -quiet \
             -project "AI Fitness Tracker.xcodeproj" \
             -scheme "AI Fitness Tracker" \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee xcodebuild.log
+            build
