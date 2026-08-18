@@ -35,13 +35,13 @@ final class HealthKitReader {
     /// associate that metric with the workout, falls back to samples inside the workout time
     /// window while preserving that distinction in `associationKind`.
     ///
-    /// Time-window fallback can contain overlapping streams from multiple devices/apps
-    /// (for example Apple Watch + iPhone). Only one canonical source/device stream is returned
-    /// so interval metrics such as distance and energy cannot be double-counted downstream.
+    /// Time-window fallback can contain overlapping streams from multiple devices/apps.
+    /// Only one canonical source/device stream is returned so interval metrics cannot be
+    /// double-counted downstream.
     ///
-    /// When workouts overlap, fallback excludes samples explicitly associated with another
-    /// workout. Remaining unassociated samples are deterministically allocated to at most one
-    /// overlapping workout so the same HealthKit UUID is never exported under two workouts.
+    /// The caller must provide every workout that overlaps this workout as ownership context,
+    /// including workouts outside the incremental export boundary. This prevents fallback
+    /// samples from being re-parented when sync windows change.
     func quantitySamples(
         identifier: HKQuantityTypeIdentifier,
         for workout: HKWorkout,
@@ -96,6 +96,7 @@ final class HealthKitReader {
         )
     }
 
+    /// Returns workouts whose start time falls in the incremental export interval.
     func workouts(
         from startDate: Date,
         to endDate: Date = Date()
@@ -105,24 +106,22 @@ final class HealthKitReader {
             end: endDate,
             options: .strictStartDate
         )
+        return try await workoutSamples(predicate: predicate)
+    }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKSampleQuery(
-                sampleType: HKObjectType.workoutType(),
-                predicate: predicate,
-                limit: HKObjectQueryNoLimit,
-                sortDescriptors: [
-                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
-                ]
-            ) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                continuation.resume(returning: samples as? [HKWorkout] ?? [])
-            }
-            healthStore.execute(query)
-        }
+    /// Returns every workout that overlaps the interval, even when it started before it.
+    /// This is used only as sample-ownership context; callers still choose which workouts
+    /// belong in the actual export payload.
+    func workoutsOverlapping(
+        from startDate: Date,
+        to endDate: Date
+    ) async throws -> [HKWorkout] {
+        let predicate = HKQuery.predicateForSamples(
+            withStart: startDate,
+            end: endDate,
+            options: []
+        )
+        return try await workoutSamples(predicate: predicate)
     }
 
     func averageHeartRate(for workout: HKWorkout) async throws -> Double? {
@@ -285,6 +284,26 @@ final class HealthKitReader {
             preferredSource: sourceBundleIdentifier == preferredSourceBundleIdentifier,
             key: samples.first.map(sourceDeviceKey) ?? ""
         )
+    }
+
+    private func workoutSamples(predicate: NSPredicate?) async throws -> [HKWorkout] {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: HKObjectType.workoutType(),
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: [
+                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+                ]
+            ) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                continuation.resume(returning: samples as? [HKWorkout] ?? [])
+            }
+            healthStore.execute(query)
+        }
     }
 
     private func samples(

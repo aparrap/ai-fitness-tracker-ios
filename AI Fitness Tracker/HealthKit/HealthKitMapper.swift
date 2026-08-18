@@ -25,7 +25,11 @@ final class HealthKitMapper {
 
         let weights = try await weightSamples.compactMap(mapWeight)
         let healthWorkouts = try await workoutSamples
-        let workouts = try await mapWorkouts(healthWorkouts)
+        let ownershipContext = try await ownershipContext(for: healthWorkouts)
+        let workouts = try await mapWorkouts(
+            healthWorkouts,
+            ownershipContext: ownershipContext
+        )
 
         return AppleHealthImportRequest(
             syncId: "iphone-\(ISO8601DateFormatter().string(from: endDate))-\(UUID().uuidString.lowercased())",
@@ -36,7 +40,24 @@ final class HealthKitMapper {
         )
     }
 
-    private func mapWorkouts(_ healthWorkouts: [HKWorkout]) async throws -> [AppleHealthWorkout] {
+    private func ownershipContext(for exportedWorkouts: [HKWorkout]) async throws -> [HKWorkout] {
+        guard
+            let earliestStart = exportedWorkouts.map(\.startDate).min(),
+            let latestEnd = exportedWorkouts.map(\.endDate).max()
+        else {
+            return []
+        }
+
+        return try await reader.workoutsOverlapping(
+            from: earliestStart,
+            to: latestEnd
+        )
+    }
+
+    private func mapWorkouts(
+        _ healthWorkouts: [HKWorkout],
+        ownershipContext: [HKWorkout]
+    ) async throws -> [AppleHealthWorkout] {
         guard !healthWorkouts.isEmpty else { return [] }
 
         var indexedResults: [(index: Int, workout: AppleHealthWorkout)] = []
@@ -60,7 +81,7 @@ final class HealthKitMapper {
                     let workout = healthWorkouts[index]
                     let overlapping = overlappingWorkouts(
                         for: workout,
-                        in: healthWorkouts
+                        in: ownershipContext
                     )
                     group.addTask { [self] in
                         (
