@@ -6,6 +6,12 @@ struct WorkoutQuantitySamples {
     let associationKind: String
 }
 
+struct AnchoredWorkoutChanges {
+    let added: [HKWorkout]
+    let deleted: [HKDeletedObject]
+    let newAnchor: HKQueryAnchor?
+}
+
 final class HealthKitReader {
     private let healthStore: HKHealthStore
 
@@ -27,22 +33,40 @@ final class HealthKitReader {
             end: endDate,
             options: .strictStartDate
         )
-
         return try await samples(type: quantityType, predicate: predicate)
+    }
+
+    func workoutChanges(
+        anchor: HKQueryAnchor?,
+        limit: Int
+    ) async throws -> AnchoredWorkoutChanges {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKAnchoredObjectQuery(
+                type: HKObjectType.workoutType(),
+                predicate: nil,
+                anchor: anchor,
+                limit: limit
+            ) { _, samples, deletedObjects, newAnchor, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                continuation.resume(
+                    returning: AnchoredWorkoutChanges(
+                        added: samples as? [HKWorkout] ?? [],
+                        deleted: deletedObjects ?? [],
+                        newAnchor: newAnchor
+                    )
+                )
+            }
+            healthStore.execute(query)
+        }
     }
 
     /// Reads samples explicitly associated with a workout first. If the source app did not
     /// associate that metric with the workout, falls back to samples inside the workout time
     /// window while preserving that distinction in `associationKind`.
-    ///
-    /// Time-window fallback can contain streams from multiple devices/apps. Complementary,
-    /// non-overlapping source segments are preserved. Source precedence is applied only inside
-    /// connected time regions where multiple streams actually conflict, preventing duplicate
-    /// interval metrics without discarding a legitimate source/device handoff mid-workout.
-    ///
-    /// The caller must provide every workout that overlaps this workout as ownership context,
-    /// including workouts outside the incremental export boundary. This prevents fallback
-    /// samples from being re-parented when sync windows change.
     func quantitySamples(
         identifier: HKQuantityTypeIdentifier,
         for workout: HKWorkout,
@@ -68,16 +92,12 @@ final class HealthKitReader {
             type: quantityType,
             workouts: overlappingWorkouts
         )
-
         let intervalPredicate = HKQuery.predicateForSamples(
             withStart: workout.startDate,
             end: workout.endDate,
             options: [.strictStartDate, .strictEndDate]
         )
-        let intervalSamples = try await samples(
-            type: quantityType,
-            predicate: intervalPredicate
-        )
+        let intervalSamples = try await samples(type: quantityType, predicate: intervalPredicate)
         let eligibleIntervalSamples = intervalSamples.filter { sample in
             !reservedSampleIDs.contains(sample.uuid)
                 && fallbackSampleBelongsToWorkout(
@@ -97,7 +117,6 @@ final class HealthKitReader {
         )
     }
 
-    /// Returns workouts whose start time falls in the incremental export interval.
     func workouts(
         from startDate: Date,
         to endDate: Date = Date()
@@ -110,9 +129,6 @@ final class HealthKitReader {
         return try await workoutSamples(predicate: predicate)
     }
 
-    /// Returns every workout that overlaps the interval, even when it started before it.
-    /// This is used only as sample-ownership context; callers still choose which workouts
-    /// belong in the actual export payload.
     func workoutsOverlapping(
         from startDate: Date,
         to endDate: Date
@@ -140,7 +156,6 @@ final class HealthKitReader {
         workouts: [HKWorkout]
     ) async throws -> Set<UUID> {
         guard !workouts.isEmpty else { return [] }
-
         var result = Set<UUID>()
         for workout in workouts {
             let associated = try await samples(
@@ -160,12 +175,10 @@ final class HealthKitReader {
         let candidates = ([workout] + overlappingWorkouts).filter { candidate in
             sample.startDate >= candidate.startDate && sample.endDate <= candidate.endDate
         }
-
         guard candidates.count > 1 else { return true }
 
         let sampleMidpoint = sample.startDate.timeIntervalSinceReferenceDate
             + sample.endDate.timeIntervalSince(sample.startDate) / 2
-
         let owner = candidates.min { left, right in
             let leftMidpoint = left.startDate.timeIntervalSinceReferenceDate
                 + left.endDate.timeIntervalSince(left.startDate) / 2
@@ -173,16 +186,10 @@ final class HealthKitReader {
                 + right.endDate.timeIntervalSince(right.startDate) / 2
             let leftDistance = abs(sampleMidpoint - leftMidpoint)
             let rightDistance = abs(sampleMidpoint - rightMidpoint)
-
-            if leftDistance != rightDistance {
-                return leftDistance < rightDistance
-            }
-            if left.duration != right.duration {
-                return left.duration < right.duration
-            }
+            if leftDistance != rightDistance { return leftDistance < rightDistance }
+            if left.duration != right.duration { return left.duration < right.duration }
             return left.uuid.uuidString < right.uuid.uuidString
         }
-
         return owner?.uuid == workout.uuid
     }
 
@@ -249,26 +256,17 @@ final class HealthKitReader {
     }
 
     private func sampleOrder(_ left: HKQuantitySample, _ right: HKQuantitySample) -> Bool {
-        if left.startDate != right.startDate {
-            return left.startDate < right.startDate
-        }
-        if left.endDate != right.endDate {
-            return left.endDate < right.endDate
-        }
+        if left.startDate != right.startDate { return left.startDate < right.startDate }
+        if left.endDate != right.endDate { return left.endDate < right.endDate }
         return left.uuid.uuidString < right.uuid.uuidString
     }
 
     private func sourceDeviceKey(for sample: HKQuantitySample) -> String {
         let source = sample.sourceRevision.source
         let device = sample.device
-        return [
-            source.bundleIdentifier,
-            device?.name,
-            device?.model,
-            device?.localIdentifier
-        ]
-        .compactMap { $0 }
-        .joined(separator: "|")
+        return [source.bundleIdentifier, device?.name, device?.model, device?.localIdentifier]
+            .compactMap { $0 }
+            .joined(separator: "|")
     }
 
     private func isStream(
@@ -276,59 +274,32 @@ final class HealthKitReader {
         rankedBelow right: [HKQuantitySample],
         preferredSourceBundleIdentifier: String
     ) -> Bool {
-        let leftScore = streamScore(
-            left,
-            preferredSourceBundleIdentifier: preferredSourceBundleIdentifier
-        )
-        let rightScore = streamScore(
-            right,
-            preferredSourceBundleIdentifier: preferredSourceBundleIdentifier
-        )
-
-        if leftScore.coveredSeconds != rightScore.coveredSeconds {
-            return leftScore.coveredSeconds < rightScore.coveredSeconds
-        }
-        if leftScore.spanSeconds != rightScore.spanSeconds {
-            return leftScore.spanSeconds < rightScore.spanSeconds
-        }
-        if leftScore.sampleCount != rightScore.sampleCount {
-            return leftScore.sampleCount < rightScore.sampleCount
-        }
-        if leftScore.preferredSource != rightScore.preferredSource {
-            return !leftScore.preferredSource && rightScore.preferredSource
-        }
+        let leftScore = streamScore(left, preferredSourceBundleIdentifier: preferredSourceBundleIdentifier)
+        let rightScore = streamScore(right, preferredSourceBundleIdentifier: preferredSourceBundleIdentifier)
+        if leftScore.coveredSeconds != rightScore.coveredSeconds { return leftScore.coveredSeconds < rightScore.coveredSeconds }
+        if leftScore.spanSeconds != rightScore.spanSeconds { return leftScore.spanSeconds < rightScore.spanSeconds }
+        if leftScore.sampleCount != rightScore.sampleCount { return leftScore.sampleCount < rightScore.sampleCount }
+        if leftScore.preferredSource != rightScore.preferredSource { return !leftScore.preferredSource && rightScore.preferredSource }
         return leftScore.key > rightScore.key
     }
 
     private func streamScore(
         _ samples: [HKQuantitySample],
         preferredSourceBundleIdentifier: String
-    ) -> (
-        coveredSeconds: TimeInterval,
-        spanSeconds: TimeInterval,
-        sampleCount: Int,
-        preferredSource: Bool,
-        key: String
-    ) {
+    ) -> (coveredSeconds: TimeInterval, spanSeconds: TimeInterval, sampleCount: Int, preferredSource: Bool, key: String) {
         let coveredSeconds = samples.reduce(0.0) { total, sample in
             total + max(0, sample.endDate.timeIntervalSince(sample.startDate))
         }
         let earliest = samples.map(\.startDate).min()
         let latest = samples.map(\.endDate).max()
-        let spanSeconds: TimeInterval
-        if let earliest, let latest {
-            spanSeconds = max(0, latest.timeIntervalSince(earliest))
-        } else {
-            spanSeconds = 0
-        }
+        let spanSeconds = earliest.flatMap { first in latest.map { max(0, $0.timeIntervalSince(first)) } } ?? 0
         let sourceBundleIdentifier = samples.first?.sourceRevision.source.bundleIdentifier ?? ""
-
         return (
-            coveredSeconds: coveredSeconds,
-            spanSeconds: spanSeconds,
-            sampleCount: samples.count,
-            preferredSource: sourceBundleIdentifier == preferredSourceBundleIdentifier,
-            key: samples.first.map(sourceDeviceKey) ?? ""
+            coveredSeconds,
+            spanSeconds,
+            samples.count,
+            sourceBundleIdentifier == preferredSourceBundleIdentifier,
+            samples.first.map(sourceDeviceKey) ?? ""
         )
     }
 
@@ -338,9 +309,7 @@ final class HealthKitReader {
                 sampleType: HKObjectType.workoutType(),
                 predicate: predicate,
                 limit: HKObjectQueryNoLimit,
-                sortDescriptors: [
-                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
-                ]
+                sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
             ) { _, samples, error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -352,18 +321,13 @@ final class HealthKitReader {
         }
     }
 
-    private func samples(
-        type: HKSampleType,
-        predicate: NSPredicate?
-    ) async throws -> [HKQuantitySample] {
+    private func samples(type: HKSampleType, predicate: NSPredicate?) async throws -> [HKQuantitySample] {
         try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(
                 sampleType: type,
                 predicate: predicate,
                 limit: HKObjectQueryNoLimit,
-                sortDescriptors: [
-                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
-                ]
+                sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
             ) { _, samples, error in
                 if let error {
                     continuation.resume(throwing: error)

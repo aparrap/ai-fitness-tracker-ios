@@ -44,7 +44,11 @@ final class SyncViewModel: ObservableObject {
 
     func saveIngestKey() {
         do {
-            try KeychainStore.saveIngestKey(ingestKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            let trimmed = ingestKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            try KeychainStore.saveIngestKey(trimmed)
+            Task {
+                await AutomaticHealthSyncCoordinator.shared.activate()
+            }
         } catch {
             status = .failure(error.localizedDescription)
         }
@@ -71,6 +75,7 @@ final class SyncViewModel: ObservableObject {
                 ingestKey: ingestKey
             )
 
+            await CoachingNotificationService.notify(from: response)
             let now = Date()
             stateStore.lastSuccessfulSyncDate = now
             lastSuccessfulSyncDate = now
@@ -100,6 +105,7 @@ final class SyncViewModel: ObservableObject {
 
     func resetSyncHistory() {
         stateStore.lastSuccessfulSyncDate = nil
+        stateStore.clearWorkoutAnchor()
         lastSuccessfulSyncDate = nil
         status = .idle
         payloadSummary = ""

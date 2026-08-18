@@ -1,13 +1,14 @@
 import Foundation
 
 /// Wire contract for POST /api/v1/import/apple-health.
-/// Keep these DTOs aligned with the backend Apple Health schema.
+/// HealthKit is the canonical activity source; source app/device fields are provenance only.
 struct AppleHealthImportRequest: Codable {
     let syncId: String
     let exportedAt: Date
     let device: AppleHealthDevice?
     let weights: [AppleHealthWeight]
     let workouts: [AppleHealthWorkout]
+    let deletedWorkoutSourceRecordIds: [String]
 }
 
 struct AppleHealthDevice: Codable {
@@ -53,9 +54,16 @@ struct AppleHealthWorkoutSample: Codable, Identifiable {
     let value: Double
     let unit: String
     let associationKind: String
-    let aggregation: String?
+    let aggregation: String
     let sourceName: String?
     let sourceBundleIdentifier: String?
+}
+
+struct AppleHealthCoachingSyncResult: Codable, Equatable {
+    let workoutId: String
+    let sourceRecordId: String
+    let status: String
+    let summary: String?
 }
 
 struct AppleHealthImportResponse: Codable, Equatable {
@@ -65,5 +73,7 @@ struct AppleHealthImportResponse: Codable, Equatable {
     let weightsProcessed: Int
     let workoutsProcessed: Int
     let workoutsMatched: Int
+    let workoutsDeleted: Int?
     let metricSamplesProcessed: Int
+    let coaching: [AppleHealthCoachingSyncResult]?
 }
