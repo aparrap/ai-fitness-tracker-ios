@@ -58,7 +58,7 @@ struct AppleHealthWorkoutSample: Codable, Identifiable {
     let sourceBundleIdentifier: String?
 }
 
-struct AppleHealthImportResponse: Codable {
+struct AppleHealthImportResponse: Codable, Equatable {
     let syncId: String
     let status: String
     let replayed: Bool
