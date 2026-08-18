@@ -1,7 +1,16 @@
 import Foundation
 import HealthKit
+import UIKit
 
 final class HealthKitMapper {
+    private struct MetricDefinition {
+        let identifier: HKQuantityTypeIdentifier
+        let metric: String
+        let unit: HKUnit
+        let unitName: String
+        let aggregation: String
+    }
+
     private let reader: HealthKitReader
 
     init(reader: HealthKitReader) {
@@ -10,83 +19,188 @@ final class HealthKitMapper {
 
     func makeRequest(from startDate: Date, to endDate: Date = Date()) async throws -> AppleHealthImportRequest {
         async let weightSamples = reader.quantitySamples(identifier: .bodyMass, from: startDate, to: endDate)
-        async let heartRateSamples = reader.quantitySamples(identifier: .heartRate, from: startDate, to: endDate)
-        async let stepSamples = reader.quantitySamples(identifier: .stepCount, from: startDate, to: endDate)
-        async let energySamples = reader.quantitySamples(identifier: .activeEnergyBurned, from: startDate, to: endDate)
-        async let distanceSamples = reader.quantitySamples(identifier: .distanceWalkingRunning, from: startDate, to: endDate)
         async let workoutSamples = reader.workouts(from: startDate, to: endDate)
 
         let weights = try await weightSamples.map(mapWeight)
-        let heartRates = try await heartRateSamples.map { sample in
-            mapMetric(sample, metric: "heart_rate", unit: HKUnit.count().unitDivided(by: .minute()), unitName: "bpm")
-        }
-        let steps = try await stepSamples.map { sample in
-            mapMetric(sample, metric: "steps", unit: .count(), unitName: "count")
-        }
-        let energies = try await energySamples.map { sample in
-            mapMetric(sample, metric: "active_energy", unit: .kilocalorie(), unitName: "kcal")
-        }
-        let distances = try await distanceSamples.map { sample in
-            mapMetric(sample, metric: "walking_running_distance", unit: .meterUnit(with: .kilo), unitName: "km")
-        }
-
         let healthWorkouts = try await workoutSamples
         var workouts: [AppleHealthWorkout] = []
         workouts.reserveCapacity(healthWorkouts.count)
 
         for workout in healthWorkouts {
-            let averageHeartRate = try? await reader.averageHeartRate(for: workout)
-            workouts.append(mapWorkout(workout, averageHeartRateBpm: averageHeartRate))
+            workouts.append(try await mapWorkout(workout))
         }
 
         return AppleHealthImportRequest(
             syncId: "iphone-\(ISO8601DateFormatter().string(from: endDate))-\(UUID().uuidString.lowercased())",
-            profileId: APIConfiguration.profileId,
-            source: "apple_health",
             exportedAt: endDate,
+            device: deviceMetadata(),
             weights: weights,
-            workouts: workouts,
-            metricSamples: heartRates + steps + energies + distances
+            workouts: workouts
         )
     }
 
     private func mapWeight(_ sample: HKQuantitySample) -> AppleHealthWeight {
         AppleHealthWeight(
-            id: sample.uuid.uuidString.lowercased(),
-            recordedAt: sample.startDate,
+            sourceRecordId: sample.uuid.uuidString.lowercased(),
+            measuredAt: sample.startDate,
+            measuredOn: localDateString(sample.startDate),
             weightKg: sample.quantity.doubleValue(for: .gramUnit(with: .kilo)),
-            sourceName: sample.sourceRevision.source.name
+            heightCm: nil
         )
     }
 
-    private func mapMetric(
-        _ sample: HKQuantitySample,
-        metric: String,
-        unit: HKUnit,
-        unitName: String
-    ) -> AppleHealthMetricSample {
-        AppleHealthMetricSample(
-            id: sample.uuid.uuidString.lowercased(),
-            metric: metric,
-            recordedAt: sample.startDate,
-            value: sample.quantity.doubleValue(for: unit),
-            unit: unitName,
-            sourceName: sample.sourceRevision.source.name
-        )
-    }
+    private func mapWorkout(_ workout: HKWorkout) async throws -> AppleHealthWorkout {
+        let samples = try await detailedSamples(for: workout)
+        let heartRates = samples
+            .filter { $0.metric == "heart_rate" }
+            .map(\.value)
 
-    private func mapWorkout(_ workout: HKWorkout, averageHeartRateBpm: Double?) -> AppleHealthWorkout {
-        AppleHealthWorkout(
-            id: workout.uuid.uuidString.lowercased(),
+        let averageHeartRate: Double? = heartRates.isEmpty
+            ? nil
+            : heartRates.reduce(0, +) / Double(heartRates.count)
+        let maximumHeartRate = heartRates.max()
+        let source = workout.sourceRevision.source
+
+        return AppleHealthWorkout(
+            sourceRecordId: workout.uuid.uuidString.lowercased(),
             activityType: workoutName(workout.workoutActivityType),
+            title: workout.workoutActivityType == .running ? "Running" : nil,
             startedAt: workout.startDate,
+            startedOn: localDateString(workout.startDate),
             endedAt: workout.endDate,
-            durationSeconds: workout.duration,
-            distanceKm: workout.totalDistance?.doubleValue(for: .meterUnit(with: .kilo)),
+            durationSeconds: Int(workout.duration.rounded()),
+            distanceM: workout.totalDistance?.doubleValue(for: .meter()),
             activeEnergyKcal: workout.totalEnergyBurned?.doubleValue(for: .kilocalorie()),
-            averageHeartRateBpm: averageHeartRateBpm,
-            sourceName: workout.sourceRevision.source.name
+            elevationGainM: nil,
+            avgHeartRateBpm: averageHeartRate,
+            maxHeartRateBpm: maximumHeartRate,
+            sourceName: source.name,
+            sourceBundleIdentifier: source.bundleIdentifier,
+            samples: samples
         )
+    }
+
+    private func detailedSamples(for workout: HKWorkout) async throws -> [AppleHealthWorkoutSample] {
+        var definitions = [
+            MetricDefinition(
+                identifier: .heartRate,
+                metric: "heart_rate",
+                unit: HKUnit.count().unitDivided(by: .minute()),
+                unitName: "bpm",
+                aggregation: "instantaneous"
+            )
+        ]
+
+        if workout.workoutActivityType == .running {
+            definitions += [
+                MetricDefinition(
+                    identifier: .runningSpeed,
+                    metric: "running_speed",
+                    unit: .meter().unitDivided(by: .second()),
+                    unitName: "m/s",
+                    aggregation: "instantaneous"
+                ),
+                MetricDefinition(
+                    identifier: .distanceWalkingRunning,
+                    metric: "distance",
+                    unit: .meter(),
+                    unitName: "m",
+                    aggregation: "interval_delta"
+                ),
+                MetricDefinition(
+                    identifier: .activeEnergyBurned,
+                    metric: "active_energy",
+                    unit: .kilocalorie(),
+                    unitName: "kcal",
+                    aggregation: "interval_delta"
+                ),
+                MetricDefinition(
+                    identifier: .stepCount,
+                    metric: "step_count",
+                    unit: .count(),
+                    unitName: "count",
+                    aggregation: "interval_delta"
+                ),
+                MetricDefinition(
+                    identifier: .runningPower,
+                    metric: "running_power",
+                    unit: .watt(),
+                    unitName: "W",
+                    aggregation: "instantaneous"
+                ),
+                MetricDefinition(
+                    identifier: .runningStrideLength,
+                    metric: "running_stride_length",
+                    unit: .meter(),
+                    unitName: "m",
+                    aggregation: "instantaneous"
+                ),
+                MetricDefinition(
+                    identifier: .runningVerticalOscillation,
+                    metric: "running_vertical_oscillation",
+                    unit: .meter(),
+                    unitName: "m",
+                    aggregation: "instantaneous"
+                ),
+                MetricDefinition(
+                    identifier: .runningGroundContactTime,
+                    metric: "running_ground_contact_time",
+                    unit: HKUnit.secondUnit(with: .milli),
+                    unitName: "ms",
+                    aggregation: "instantaneous"
+                )
+            ]
+        }
+
+        var result: [AppleHealthWorkoutSample] = []
+
+        for definition in definitions {
+            let queryResult = try await reader.quantitySamples(
+                identifier: definition.identifier,
+                for: workout
+            )
+
+            result.append(contentsOf: queryResult.samples.map { sample in
+                AppleHealthWorkoutSample(
+                    sourceRecordId: sample.uuid.uuidString.lowercased(),
+                    metric: definition.metric,
+                    sampledAt: sample.startDate,
+                    sampleEndedAt: sample.endDate,
+                    value: sample.quantity.doubleValue(for: definition.unit),
+                    unit: definition.unitName,
+                    associationKind: queryResult.associationKind,
+                    aggregation: definition.aggregation,
+                    sourceName: sample.sourceRevision.source.name,
+                    sourceBundleIdentifier: sample.sourceRevision.source.bundleIdentifier
+                )
+            })
+        }
+
+        return result.sorted { left, right in
+            if left.sampledAt == right.sampledAt {
+                return left.metric < right.metric
+            }
+            return left.sampledAt < right.sampledAt
+        }
+    }
+
+    private func deviceMetadata() -> AppleHealthDevice {
+        let device = UIDevice.current
+        return AppleHealthDevice(
+            name: device.name,
+            model: device.model,
+            systemVersion: device.systemVersion,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        )
+    }
+
+    private func localDateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     private func workoutName(_ activity: HKWorkoutActivityType) -> String {

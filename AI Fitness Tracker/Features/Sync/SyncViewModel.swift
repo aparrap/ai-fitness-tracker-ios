@@ -59,8 +59,11 @@ final class SyncViewModel: ObservableObject {
             let mapper = HealthKitMapper(reader: reader)
             let startDate = stateStore.startDate(fallbackDays: initialSyncDays)
             let payload = try await mapper.makeRequest(from: startDate)
+            let metricSampleCount = payload.workouts.reduce(0) { total, workout in
+                total + workout.samples.count
+            }
 
-            payloadSummary = "\(payload.weights.count) weights • \(payload.workouts.count) workouts • \(payload.metricSamples.count) metric samples"
+            payloadSummary = "\(payload.weights.count) weights • \(payload.workouts.count) workouts • \(metricSampleCount) workout samples"
 
             status = .uploading
             let response = try await apiClient.importAppleHealth(
@@ -76,7 +79,6 @@ final class SyncViewModel: ObservableObject {
             status = .failure(error.localizedDescription)
         }
     }
-
 
     func inspectLatestAdidasRun() async {
         diagnosticsError = nil

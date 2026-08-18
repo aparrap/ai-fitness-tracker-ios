@@ -1,6 +1,11 @@
 import Foundation
 import HealthKit
 
+struct WorkoutQuantitySamples {
+    let samples: [HKQuantitySample]
+    let associationKind: String
+}
+
 final class HealthKitReader {
     private let healthStore: HKHealthStore
 
@@ -23,23 +28,46 @@ final class HealthKitReader {
             options: .strictStartDate
         )
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKSampleQuery(
-                sampleType: quantityType,
-                predicate: predicate,
-                limit: HKObjectQueryNoLimit,
-                sortDescriptors: [
-                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
-                ]
-            ) { _, samples, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                continuation.resume(returning: samples as? [HKQuantitySample] ?? [])
-            }
-            healthStore.execute(query)
+        return try await samples(type: quantityType, predicate: predicate)
+    }
+
+    /// Reads samples explicitly associated with a workout first. If the source app did not
+    /// associate that metric with the workout, falls back to samples inside the workout time
+    /// window while preserving that distinction in `associationKind`.
+    func quantitySamples(
+        identifier: HKQuantityTypeIdentifier,
+        for workout: HKWorkout
+    ) async throws -> WorkoutQuantitySamples {
+        guard let quantityType = HKObjectType.quantityType(forIdentifier: identifier) else {
+            throw HealthKitError.unsupportedType(identifier.rawValue)
         }
+
+        let associated = try await samples(
+            type: quantityType,
+            predicate: HKQuery.predicateForObjects(from: workout)
+        )
+
+        if !associated.isEmpty {
+            return WorkoutQuantitySamples(
+                samples: associated,
+                associationKind: "workout_associated"
+            )
+        }
+
+        let intervalPredicate = HKQuery.predicateForSamples(
+            withStart: workout.startDate,
+            end: workout.endDate,
+            options: [.strictStartDate, .strictEndDate]
+        )
+        let intervalSamples = try await samples(
+            type: quantityType,
+            predicate: intervalPredicate
+        )
+
+        return WorkoutQuantitySamples(
+            samples: intervalSamples,
+            associationKind: "time_window"
+        )
     }
 
     func workouts(
@@ -72,30 +100,31 @@ final class HealthKitReader {
     }
 
     func averageHeartRate(for workout: HKWorkout) async throws -> Double? {
-        guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else {
-            return nil
-        }
+        let result = try await quantitySamples(identifier: .heartRate, for: workout)
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        let values = result.samples.map { $0.quantity.doubleValue(for: unit) }
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
 
-        let predicate = HKQuery.predicateForSamples(
-            withStart: workout.startDate,
-            end: workout.endDate,
-            options: [.strictStartDate, .strictEndDate]
-        )
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let query = HKStatisticsQuery(
-                quantityType: heartRateType,
-                quantitySamplePredicate: predicate,
-                options: .discreteAverage
-            ) { _, result, error in
+    private func samples(
+        type: HKSampleType,
+        predicate: NSPredicate?
+    ) async throws -> [HKQuantitySample] {
+        try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: type,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: [
+                    NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+                ]
+            ) { _, samples, error in
                 if let error {
                     continuation.resume(throwing: error)
                     return
                 }
-
-                let unit = HKUnit.count().unitDivided(by: .minute())
-                let bpm = result?.averageQuantity()?.doubleValue(for: unit)
-                continuation.resume(returning: bpm)
+                continuation.resume(returning: samples as? [HKQuantitySample] ?? [])
             }
             healthStore.execute(query)
         }
