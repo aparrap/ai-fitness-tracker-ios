@@ -1,37 +1,61 @@
 {
   "syncId": "iphone-2026-08-14T21:30:00Z-example",
-  "profileId": "8d553210-69a8-4f25-91be-000000000001",
-  "source": "apple_health",
   "exportedAt": "2026-08-14T21:30:00Z",
+  "device": {
+    "name": "Andres's iPhone",
+    "model": "iPhone",
+    "systemVersion": "18.x",
+    "appVersion": "1.0"
+  },
   "weights": [
     {
-      "id": "healthkit-sample-uuid",
-      "recordedAt": "2026-08-14T07:00:00Z",
-      "weightKg": 103.5,
-      "sourceName": "Health"
+      "sourceRecordId": "healthkit-weight-uuid",
+      "measuredAt": "2026-08-14T07:00:00Z",
+      "measuredOn": "2026-08-14",
+      "weightKg": 103.5
     }
   ],
   "workouts": [
     {
-      "id": "workout-uuid",
+      "sourceRecordId": "healthkit-workout-uuid",
       "activityType": "running",
+      "title": "Running",
       "startedAt": "2026-08-14T18:00:00Z",
+      "startedOn": "2026-08-14",
       "endedAt": "2026-08-14T18:38:04Z",
       "durationSeconds": 2284,
-      "distanceKm": 5.24,
+      "distanceM": 5240,
       "activeEnergyKcal": 586,
-      "averageHeartRateBpm": 154,
-      "sourceName": "Apple Watch"
-    }
-  ],
-  "metricSamples": [
-    {
-      "id": "hr-sample-uuid",
-      "metric": "heart_rate",
-      "recordedAt": "2026-08-14T18:10:00Z",
-      "value": 154,
-      "unit": "bpm",
-      "sourceName": "Apple Watch"
+      "avgHeartRateBpm": 154,
+      "maxHeartRateBpm": 168,
+      "sourceName": "adidas Running",
+      "sourceBundleIdentifier": "com.runtastic.iphone",
+      "samples": [
+        {
+          "sourceRecordId": "healthkit-hr-uuid",
+          "metric": "heart_rate",
+          "sampledAt": "2026-08-14T18:10:00Z",
+          "sampleEndedAt": "2026-08-14T18:10:00Z",
+          "value": 154,
+          "unit": "bpm",
+          "associationKind": "time_window",
+          "aggregation": "instantaneous",
+          "sourceName": "Apple Watch",
+          "sourceBundleIdentifier": "com.apple.health"
+        },
+        {
+          "sourceRecordId": "healthkit-speed-uuid",
+          "metric": "running_speed",
+          "sampledAt": "2026-08-14T18:10:05Z",
+          "sampleEndedAt": "2026-08-14T18:10:05Z",
+          "value": 2.22,
+          "unit": "m/s",
+          "associationKind": "workout_associated",
+          "aggregation": "instantaneous",
+          "sourceName": "adidas Running",
+          "sourceBundleIdentifier": "com.runtastic.iphone"
+        }
+      ]
     }
   ]
 }

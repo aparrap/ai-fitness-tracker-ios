@@ -1,48 +1,64 @@
 import Foundation
 
-/// Backend DTOs for POST /api/v1/import/apple-health.
-///
-/// IMPORTANT: The backend endpoint already exists. Keep changes to its wire contract
-/// isolated in this file and `HealthKitMapper.swift`.
+/// Wire contract for POST /api/v1/import/apple-health.
+/// Keep these DTOs aligned with the backend Apple Health schema.
 struct AppleHealthImportRequest: Codable {
     let syncId: String
-    let profileId: String
-    let source: String
     let exportedAt: Date
+    let device: AppleHealthDevice?
     let weights: [AppleHealthWeight]
     let workouts: [AppleHealthWorkout]
-    let metricSamples: [AppleHealthMetricSample]
 }
 
-struct AppleHealthWeight: Codable, Identifiable {
-    let id: String
-    let recordedAt: Date
+struct AppleHealthDevice: Codable {
+    let name: String?
+    let model: String?
+    let systemVersion: String?
+    let appVersion: String?
+}
+
+struct AppleHealthWeight: Codable {
+    let sourceRecordId: String
+    let measuredAt: Date
+    let measuredOn: String
     let weightKg: Double
-    let sourceName: String?
+    let heightCm: Double?
 }
 
-struct AppleHealthWorkout: Codable, Identifiable {
-    let id: String
+struct AppleHealthWorkout: Codable {
+    let sourceRecordId: String
     let activityType: String
+    let title: String?
     let startedAt: Date
+    let startedOn: String
     let endedAt: Date
-    let durationSeconds: Double
-    let distanceKm: Double?
+    let durationSeconds: Int?
+    let distanceM: Double?
     let activeEnergyKcal: Double?
-    let averageHeartRateBpm: Double?
+    let elevationGainM: Double?
+    let avgHeartRateBpm: Double?
+    let maxHeartRateBpm: Double?
     let sourceName: String?
+    let sourceBundleIdentifier: String?
+    let samples: [AppleHealthWorkoutSample]
 }
 
-struct AppleHealthMetricSample: Codable, Identifiable {
-    let id: String
+struct AppleHealthWorkoutSample: Codable, Identifiable {
+    var id: String { sourceRecordId }
+
+    let sourceRecordId: String
     let metric: String
-    let recordedAt: Date
+    let sampledAt: Date
+    let sampleEndedAt: Date?
     let value: Double
     let unit: String
+    let associationKind: String
+    let aggregation: String?
     let sourceName: String?
+    let sourceBundleIdentifier: String?
 }
 
-struct AppleHealthImportResponse: Codable {
+struct AppleHealthImportResponse: Codable, Equatable {
     let syncId: String
     let status: String
     let replayed: Bool
