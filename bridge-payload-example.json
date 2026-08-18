@@ -1,0 +1,37 @@
+{
+  "syncId": "iphone-2026-08-14T21:30:00Z-example",
+  "profileId": "8d553210-69a8-4f25-91be-000000000001",
+  "source": "apple_health",
+  "exportedAt": "2026-08-14T21:30:00Z",
+  "weights": [
+    {
+      "id": "healthkit-sample-uuid",
+      "recordedAt": "2026-08-14T07:00:00Z",
+      "weightKg": 103.5,
+      "sourceName": "Health"
+    }
+  ],
+  "workouts": [
+    {
+      "id": "workout-uuid",
+      "activityType": "running",
+      "startedAt": "2026-08-14T18:00:00Z",
+      "endedAt": "2026-08-14T18:38:04Z",
+      "durationSeconds": 2284,
+      "distanceKm": 5.24,
+      "activeEnergyKcal": 586,
+      "averageHeartRateBpm": 154,
+      "sourceName": "Apple Watch"
+    }
+  ],
+  "metricSamples": [
+    {
+      "id": "hr-sample-uuid",
+      "metric": "heart_rate",
+      "recordedAt": "2026-08-14T18:10:00Z",
+      "value": 154,
+      "unit": "bpm",
+      "sourceName": "Apple Watch"
+    }
+  ]
+}
