@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import HealthKit
 import UserNotifications
@@ -170,24 +169,27 @@ actor AutomaticHealthSyncWorker {
 
             if !workouts.isEmpty || !deletedIds.isEmpty {
                 let exportedAt = Date()
+                let syncId = stateStore.createPendingAutomaticSyncId()
                 let request = try await mapper.makeIncrementalRequest(
                     workouts: workouts,
                     deletedWorkoutSourceRecordIds: deletedIds,
                     exportedAt: exportedAt,
-                    syncId: syncIdentifier(
-                        workouts: workouts,
-                        deletedIds: deletedIds,
-                        anchor: changes.newAnchor
-                    )
+                    syncId: syncId
                 )
                 let response = try await apiClient.importAppleHealth(
                     payload: request,
                     ingestKey: ingestKey
                 )
                 await CoachingNotificationService.notify(from: response)
+
+                // Clear only after backend acceptance. If the app is killed before this point,
+                // the same HealthKit page reuses the same backend idempotency key on retry.
+                stateStore.clearPendingAutomaticSyncId()
             }
 
-            // Commit the HealthKit cursor only after the corresponding backend page succeeds.
+            // Advance the HealthKit cursor only after the corresponding backend page succeeds.
+            // If saving the cursor fails after clearing the pending key, the page may be safely
+            // reprocessed with a new sync id because backend record-level imports are idempotent.
             try stateStore.saveWorkoutAnchor(changes.newAnchor)
             anchor = changes.newAnchor
 
@@ -200,33 +202,6 @@ actor AutomaticHealthSyncWorker {
         }
 
         throw HealthKitError.queryFailed("HealthKit incremental sync exceeded the per-wake page limit")
-    }
-
-    private func syncIdentifier(
-        workouts: [HKWorkout],
-        deletedIds: [String],
-        anchor: HKQueryAnchor?
-    ) -> String {
-        var material = Data()
-        for id in workouts.map({ $0.uuid.uuidString.lowercased() }).sorted() {
-            material.append(contentsOf: id.utf8)
-            material.append(0)
-        }
-        for id in deletedIds.sorted() {
-            material.append(contentsOf: id.utf8)
-            material.append(0)
-        }
-        if let anchor,
-           let data = try? NSKeyedArchiver.archivedData(
-               withRootObject: anchor,
-               requiringSecureCoding: true
-           ) {
-            material.append(data)
-        }
-
-        let digest = SHA256.hash(data: material)
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return "healthkit-anchor-\(hex.prefix(40))"
     }
 }
 
