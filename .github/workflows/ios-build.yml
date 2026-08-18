@@ -27,12 +27,12 @@ jobs:
 
       - name: Build iOS app
         run: |
-          set -o pipefail
           xcodebuild \
+            -quiet \
             -project "AI Fitness Tracker.xcodeproj" \
             -scheme "AI Fitness Tracker" \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee xcodebuild.log
+            build
