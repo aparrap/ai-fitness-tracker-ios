@@ -35,9 +35,10 @@ final class HealthKitReader {
     /// associate that metric with the workout, falls back to samples inside the workout time
     /// window while preserving that distinction in `associationKind`.
     ///
-    /// Time-window fallback can contain overlapping streams from multiple devices/apps.
-    /// Only one canonical source/device stream is returned so interval metrics cannot be
-    /// double-counted downstream.
+    /// Time-window fallback can contain streams from multiple devices/apps. Complementary,
+    /// non-overlapping source segments are preserved. Source precedence is applied only inside
+    /// connected time regions where multiple streams actually conflict, preventing duplicate
+    /// interval metrics without discarding a legitimate source/device handoff mid-workout.
     ///
     /// The caller must provide every workout that overlaps this workout as ownership context,
     /// including workouts outside the incremental export boundary. This prevents fallback
@@ -85,7 +86,7 @@ final class HealthKitReader {
                     overlappingWorkouts: overlappingWorkouts
                 )
         }
-        let canonicalSamples = canonicalFallbackStream(
+        let canonicalSamples = canonicalFallbackSamples(
             from: eligibleIntervalSamples,
             preferredSourceBundleIdentifier: workout.sourceRevision.source.bundleIdentifier
         )
@@ -185,31 +186,76 @@ final class HealthKitReader {
         return owner?.uuid == workout.uuid
     }
 
-    private func canonicalFallbackStream(
+    private func canonicalFallbackSamples(
         from samples: [HKQuantitySample],
         preferredSourceBundleIdentifier: String
     ) -> [HKQuantitySample] {
-        guard !samples.isEmpty else { return [] }
+        let ordered = samples.sorted(by: sampleOrder)
+        guard ordered.count > 1 else { return ordered }
 
-        let grouped = Dictionary(grouping: samples, by: sourceDeviceKey)
-        guard grouped.count > 1 else {
-            return samples.sorted { $0.startDate < $1.startDate }
+        var result: [HKQuantitySample] = []
+        var component: [HKQuantitySample] = []
+        var componentEnd: Date?
+        var componentHasPointAtEnd = false
+
+        func appendResolvedComponent() {
+            guard !component.isEmpty else { return }
+            let grouped = Dictionary(grouping: component, by: sourceDeviceKey)
+            if grouped.count <= 1 {
+                result.append(contentsOf: component)
+            } else {
+                let selected = grouped.max { left, right in
+                    isStream(
+                        left.value,
+                        rankedBelow: right.value,
+                        preferredSourceBundleIdentifier: preferredSourceBundleIdentifier
+                    )
+                }?.value ?? []
+                result.append(contentsOf: selected)
+            }
         }
 
-        let selected = grouped.max { left, right in
-            isStream(
-                left.value,
-                rankedBelow: right.value,
-                preferredSourceBundleIdentifier: preferredSourceBundleIdentifier
-            )
-        }?.value ?? []
-
-        return selected.sorted { left, right in
-            if left.startDate == right.startDate {
-                return left.uuid.uuidString < right.uuid.uuidString
+        for sample in ordered {
+            guard let currentEnd = componentEnd else {
+                component = [sample]
+                componentEnd = sample.endDate
+                componentHasPointAtEnd = sample.startDate == sample.endDate
+                continue
             }
+
+            let isPoint = sample.startDate == sample.endDate
+            let overlapsComponent = sample.startDate < currentEnd
+                || (sample.startDate == currentEnd && (isPoint || componentHasPointAtEnd))
+
+            if !overlapsComponent {
+                appendResolvedComponent()
+                component = [sample]
+                componentEnd = sample.endDate
+                componentHasPointAtEnd = isPoint
+                continue
+            }
+
+            component.append(sample)
+            if sample.endDate > currentEnd {
+                componentEnd = sample.endDate
+                componentHasPointAtEnd = isPoint
+            } else if sample.endDate == currentEnd && isPoint {
+                componentHasPointAtEnd = true
+            }
+        }
+
+        appendResolvedComponent()
+        return result.sorted(by: sampleOrder)
+    }
+
+    private func sampleOrder(_ left: HKQuantitySample, _ right: HKQuantitySample) -> Bool {
+        if left.startDate != right.startDate {
             return left.startDate < right.startDate
         }
+        if left.endDate != right.endDate {
+            return left.endDate < right.endDate
+        }
+        return left.uuid.uuidString < right.uuid.uuidString
     }
 
     private func sourceDeviceKey(for sample: HKQuantitySample) -> String {
