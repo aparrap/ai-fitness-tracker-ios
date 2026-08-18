@@ -23,7 +23,7 @@ final class HealthKitMapper {
         async let weightSamples = reader.quantitySamples(identifier: .bodyMass, from: startDate, to: endDate)
         async let workoutSamples = reader.workouts(from: startDate, to: endDate)
 
-        let weights = try await weightSamples.map(mapWeight)
+        let weights = try await weightSamples.compactMap(mapWeight)
         let healthWorkouts = try await workoutSamples
         let workouts = try await mapWorkouts(healthWorkouts)
 
@@ -58,8 +58,18 @@ final class HealthKitMapper {
             ) { group in
                 for index in batchStart..<batchEnd {
                     let workout = healthWorkouts[index]
+                    let overlapping = overlappingWorkouts(
+                        for: workout,
+                        in: healthWorkouts
+                    )
                     group.addTask { [self] in
-                        (index, try await mapWorkout(workout))
+                        (
+                            index,
+                            try await mapWorkout(
+                                workout,
+                                overlappingWorkouts: overlapping
+                            )
+                        )
                     }
                 }
 
@@ -79,18 +89,43 @@ final class HealthKitMapper {
             .map { $0.workout }
     }
 
-    private func mapWeight(_ sample: HKQuantitySample) -> AppleHealthWeight {
-        AppleHealthWeight(
+    private func overlappingWorkouts(
+        for workout: HKWorkout,
+        in workouts: [HKWorkout]
+    ) -> [HKWorkout] {
+        workouts.filter { candidate in
+            candidate.uuid != workout.uuid
+                && candidate.startDate < workout.endDate
+                && candidate.endDate > workout.startDate
+        }
+    }
+
+    private func mapWeight(_ sample: HKQuantitySample) -> AppleHealthWeight? {
+        let weightKg = sample.quantity.doubleValue(for: .gramUnit(with: .kilo))
+        guard weightKg.isFinite && weightKg > 0 && weightKg <= 500 else {
+            return nil
+        }
+
+        return AppleHealthWeight(
             sourceRecordId: sample.uuid.uuidString.lowercased(),
             measuredAt: sample.startDate,
-            measuredOn: localDateString(sample.startDate),
-            weightKg: sample.quantity.doubleValue(for: .gramUnit(with: .kilo)),
+            measuredOn: localDateString(
+                sample.startDate,
+                metadata: sample.metadata
+            ),
+            weightKg: weightKg,
             heightCm: nil
         )
     }
 
-    private func mapWorkout(_ workout: HKWorkout) async throws -> AppleHealthWorkout {
-        let samples = try await detailedSamples(for: workout)
+    private func mapWorkout(
+        _ workout: HKWorkout,
+        overlappingWorkouts: [HKWorkout]
+    ) async throws -> AppleHealthWorkout {
+        let samples = try await detailedSamples(
+            for: workout,
+            overlappingWorkouts: overlappingWorkouts
+        )
         let heartRates = samples
             .filter { $0.metric == "heart_rate" }
             .map(\.value)
@@ -101,16 +136,34 @@ final class HealthKitMapper {
         let maximumHeartRate = heartRates.max()
         let source = workout.sourceRevision.source
 
+        let durationSeconds = Int(workout.duration.rounded())
+        let validatedDurationSeconds = (0...(7 * 24 * 60 * 60)).contains(durationSeconds)
+            ? durationSeconds
+            : nil
+
+        let rawDistanceM = workout.totalDistance?.doubleValue(for: .meter())
+        let distanceM = rawDistanceM.flatMap {
+            $0.isFinite && $0 >= 0 && $0 <= 500_000 ? $0 : nil
+        }
+
+        let rawActiveEnergyKcal = workout.totalEnergyBurned?.doubleValue(for: .kilocalorie())
+        let activeEnergyKcal = rawActiveEnergyKcal.flatMap {
+            $0.isFinite && $0 >= 0 && $0 <= 50_000 ? $0 : nil
+        }
+
         return AppleHealthWorkout(
             sourceRecordId: workout.uuid.uuidString.lowercased(),
             activityType: workoutName(workout.workoutActivityType),
             title: workout.workoutActivityType == .running ? "Running" : nil,
             startedAt: workout.startDate,
-            startedOn: localDateString(workout.startDate),
+            startedOn: localDateString(
+                workout.startDate,
+                metadata: workout.metadata
+            ),
             endedAt: workout.endDate,
-            durationSeconds: Int(workout.duration.rounded()),
-            distanceM: workout.totalDistance?.doubleValue(for: .meter()),
-            activeEnergyKcal: workout.totalEnergyBurned?.doubleValue(for: .kilocalorie()),
+            durationSeconds: validatedDurationSeconds,
+            distanceM: distanceM,
+            activeEnergyKcal: activeEnergyKcal,
             elevationGainM: nil,
             avgHeartRateBpm: averageHeartRate,
             maxHeartRateBpm: maximumHeartRate,
@@ -120,7 +173,10 @@ final class HealthKitMapper {
         )
     }
 
-    private func detailedSamples(for workout: HKWorkout) async throws -> [AppleHealthWorkoutSample] {
+    private func detailedSamples(
+        for workout: HKWorkout,
+        overlappingWorkouts: [HKWorkout]
+    ) async throws -> [AppleHealthWorkoutSample] {
         var definitions = [
             MetricDefinition(
                 identifier: .heartRate,
@@ -213,7 +269,8 @@ final class HealthKitMapper {
                     group.addTask { [reader] in
                         let queryResult = try await reader.quantitySamples(
                             identifier: definition.identifier,
-                            for: workout
+                            for: workout,
+                            excludingSamplesAssociatedWith: overlappingWorkouts
                         )
 
                         return queryResult.samples.compactMap { sample in
@@ -265,15 +322,22 @@ final class HealthKitMapper {
         switch metric {
         case "heart_rate":
             return value > 0 && value <= 260
-        case "running_speed",
-             "distance",
-             "active_energy",
-             "step_count",
-             "running_power",
-             "running_stride_length",
-             "running_vertical_oscillation",
-             "running_ground_contact_time":
-            return value >= 0
+        case "running_speed":
+            return value >= 0 && value <= 20
+        case "distance":
+            return value >= 0 && value <= 500_000
+        case "active_energy":
+            return value >= 0 && value <= 50_000
+        case "step_count":
+            return value >= 0 && value <= 1_000_000
+        case "running_power":
+            return value >= 0 && value <= 5_000
+        case "running_stride_length":
+            return value >= 0 && value <= 5
+        case "running_vertical_oscillation":
+            return value >= 0 && value <= 1
+        case "running_ground_contact_time":
+            return value >= 0 && value <= 5_000
         default:
             return false
         }
@@ -289,13 +353,26 @@ final class HealthKitMapper {
         )
     }
 
-    private func localDateString(_ date: Date) -> String {
+    private func localDateString(
+        _ date: Date,
+        metadata: [String: Any]?
+    ) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
+        formatter.timeZone = timeZone(from: metadata) ?? .current
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
+    }
+
+    private func timeZone(from metadata: [String: Any]?) -> TimeZone? {
+        if let timeZone = metadata?[HKMetadataKeyTimeZone] as? TimeZone {
+            return timeZone
+        }
+        if let identifier = metadata?[HKMetadataKeyTimeZone] as? String {
+            return TimeZone(identifier: identifier)
+        }
+        return nil
     }
 
     private func workoutName(_ activity: HKWorkoutActivityType) -> String {

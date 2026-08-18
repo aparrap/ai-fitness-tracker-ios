@@ -38,9 +38,14 @@ final class HealthKitReader {
     /// Time-window fallback can contain overlapping streams from multiple devices/apps
     /// (for example Apple Watch + iPhone). Only one canonical source/device stream is returned
     /// so interval metrics such as distance and energy cannot be double-counted downstream.
+    ///
+    /// When workouts overlap, fallback also excludes samples explicitly associated with one
+    /// of the other overlapping workouts. This prevents a time-window match from reassigning
+    /// a globally-idempotent HealthKit sample away from the workout it actually belongs to.
     func quantitySamples(
         identifier: HKQuantityTypeIdentifier,
-        for workout: HKWorkout
+        for workout: HKWorkout,
+        excludingSamplesAssociatedWith overlappingWorkouts: [HKWorkout] = []
     ) async throws -> WorkoutQuantitySamples {
         guard let quantityType = HKObjectType.quantityType(forIdentifier: identifier) else {
             throw HealthKitError.unsupportedType(identifier.rawValue)
@@ -58,6 +63,11 @@ final class HealthKitReader {
             )
         }
 
+        let reservedSampleIDs = try await associatedSampleIDs(
+            type: quantityType,
+            workouts: overlappingWorkouts
+        )
+
         let intervalPredicate = HKQuery.predicateForSamples(
             withStart: workout.startDate,
             end: workout.endDate,
@@ -67,8 +77,11 @@ final class HealthKitReader {
             type: quantityType,
             predicate: intervalPredicate
         )
+        let eligibleIntervalSamples = intervalSamples.filter {
+            !reservedSampleIDs.contains($0.uuid)
+        }
         let canonicalSamples = canonicalFallbackStream(
-            from: intervalSamples,
+            from: eligibleIntervalSamples,
             preferredSourceBundleIdentifier: workout.sourceRevision.source.bundleIdentifier
         )
 
@@ -117,6 +130,23 @@ final class HealthKitReader {
         return values.reduce(0, +) / Double(values.count)
     }
 
+    private func associatedSampleIDs(
+        type: HKSampleType,
+        workouts: [HKWorkout]
+    ) async throws -> Set<UUID> {
+        guard !workouts.isEmpty else { return [] }
+
+        var result = Set<UUID>()
+        for workout in workouts {
+            let associated = try await samples(
+                type: type,
+                predicate: HKQuery.predicateForObjects(from: workout)
+            )
+            result.formUnion(associated.map(\.uuid))
+        }
+        return result
+    }
+
     private func canonicalFallbackStream(
         from samples: [HKQuantitySample],
         preferredSourceBundleIdentifier: String
@@ -129,8 +159,11 @@ final class HealthKitReader {
         }
 
         let selected = grouped.max { left, right in
-            isStream(left.value, rankedBelow: right.value,
-                     preferredSourceBundleIdentifier: preferredSourceBundleIdentifier)
+            isStream(
+                left.value,
+                rankedBelow: right.value,
+                preferredSourceBundleIdentifier: preferredSourceBundleIdentifier
+            )
         }?.value ?? []
 
         return selected.sorted { left, right in
